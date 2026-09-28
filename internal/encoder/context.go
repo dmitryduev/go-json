@@ -119,9 +119,8 @@ const (
 	// interface{} of a JSON document, an object, an array, a string, a number and a boolean. Which types share a
 	// set depends on where the binary has them, which any change of the program moves, and even the directory it
 	// is built in: without the victims, three of six types of a set cost map[string]interface{} 10..20% on amd64.
-	// A lookup which misses them costs what it did without them, since the path of a miss has fewer calls
-	// ( see missedCodeSet ); by BenchmarkRecentCodeSetsByTurns on amd64, three to six types of a set cost a
-	// fifth of what they did, and 48 types by turns, more than the table holds, 5% less.
+	// A lookup which misses them looks the type up in the shared table without a call ( see
+	// CompileToGetCodeSet ), which costs about what the lookup of an array does ( see runtime.TypeCache ).
 	recentCodeSetVictims = 4
 )
 

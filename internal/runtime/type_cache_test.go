@@ -1,8 +1,11 @@
 package runtime
 
 import (
+	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"unsafe"
 )
 
 func TestTypeCache(t *testing.T) {
@@ -88,6 +91,52 @@ func TestTypeCacheConcurrently(t *testing.T) {
 			if results[w][i] != cached {
 				t.Fatalf("worker %d got a value for %d which is not cached", w, i)
 			}
+		}
+	}
+}
+
+// typeCacheTypes returns the addresses of n objects of the size of a type descriptor, laid out as the types of a
+// program are: aligned and close to each other.
+func typeCacheTypes(n int) []uintptr {
+	objs := make([][80]byte, n)
+	keepTypeCacheTypes = append(keepTypeCacheTypes, objs)
+	types := make([]uintptr, n)
+	for i := range objs {
+		types[i] = uintptr(unsafe.Pointer(&objs[i]))
+	}
+	return types
+}
+
+var keepTypeCacheTypes [][][80]byte
+
+var typeCacheSink *int
+
+// BenchmarkTypeCacheLoad looks up types by turns in tables of several sizes, and reports the bytes of the buckets
+// of a table for each of its types.
+func BenchmarkTypeCacheLoad(b *testing.B) {
+	for _, n := range []int{16, 1024, 8192} {
+		types := typeCacheTypes(n)
+		v := 1
+		var cache TypeCache[int]
+		for _, typ := range types {
+			cache.Store(typ, &v)
+		}
+		table := atomic.LoadPointer(&cache.cache.table)
+		bytesPerType := float64(uintptr(1)<<(64-uintptr(table)%typeBucketAlign)*typeBucketAlign) / float64(n)
+		for _, k := range []int{1, 8, 128} {
+			if k > n {
+				continue
+			}
+			look := make([]uintptr, k)
+			for i := range look {
+				look[i] = types[(i*7919)%n]
+			}
+			b.Run(fmt.Sprintf("%d types/%d by turns", n, k), func(b *testing.B) {
+				for i := 0; i < b.N; i++ {
+					typeCacheSink = cache.Load(look[i%k])
+				}
+				b.ReportMetric(bytesPerType, "bytes/type")
+			})
 		}
 	}
 }

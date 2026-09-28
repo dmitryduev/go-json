@@ -16,17 +16,44 @@ import (
 // CompileToGetCodeSet returns the opcodes of the type, compiling them if the type is new.
 //
 // A lookup which misses the set of the type in the context comes here for every value of interface{} of a type
-// which its set doesn't hold, so this path makes as few calls as it can: the shared table is looked up here, and
-// only the compilation of a new type and the filter of a field query are calls.
+// which its set doesn't hold, so this path makes as few calls as it can: the victims of the context and the table
+// shared by every goroutine, whose lookup costs about what the one of an array does, are looked up here, and only
+// the compilation of a new type and the filter of a field query are calls ( see missedCodeSet ).
 func CompileToGetCodeSet(ctx *RuntimeContext, typeptr uintptr) (*OpcodeSet, error) {
 	if codeSet := ctx.RecentCodeSet(typeptr); codeSet != nil {
 		return codeSet, nil
 	}
+	if ctx.Option.Flag&(ContextOption|OptimizeFieldOrderOption) == 0 {
+		// a type evicted from its set stays where it is: a type of a set encoded by turns with two others would
+		// evict one of them again if it took its entry back.
+		for i := range ctx.recentVictims {
+			if ctx.recentVictims[i].typeptr == typeptr {
+				return ctx.recentVictims[i].codeSet, nil
+			}
+		}
+		if codeSet := cachedOpcodeSets.Load(typeptr); codeSet != nil {
+			ctx.rememberCodeSet(typeptr, codeSet)
+			return codeSet, nil
+		}
+	}
 	return ctx.missedCodeSet(typeptr)
 }
 
-// missedCodeSet is CompileToGetCodeSet for a type which RecentCodeSet doesn't find: it is a function of its own,
-// so that the lookups which hit, the type passed to every Marshal, don't pay for the frame of this one.
+// rememberCodeSet puts the opcodes of the type in the first entry of its set: the one encoded before it is kept in
+// the second, and the one in the second in the victims, in the place of the one evicted the earliest.
+func (c *RuntimeContext) rememberCodeSet(key uintptr, codeSet *OpcodeSet) {
+	set := &c.recentCodeSets[recentCodeSetIndex(key)]
+	if evicted := set[len(set)-1]; evicted.codeSet != nil {
+		c.recentVictims[c.recentVictimNext%recentCodeSetVictims] = evicted
+		c.recentVictimNext++
+	}
+	set[1] = set[0]
+	set[0] = recentCodeSet{typeptr: key, codeSet: codeSet}
+}
+
+// missedCodeSet is CompileToGetCodeSet for a type which neither the context nor the shared table has, or for a
+// context which may filter the fields or with the fields ordered by the encoder: it is a function of its own, so
+// that the lookups which hit, the type passed to every Marshal, don't pay for the frame of this one.
 //
 //go:noinline
 func (c *RuntimeContext) missedCodeSet(typeptr uintptr) (*OpcodeSet, error) {
@@ -63,14 +90,7 @@ func (c *RuntimeContext) missedCodeSet(typeptr uintptr) (*OpcodeSet, error) {
 			return nil, err
 		}
 	}
-	// the type takes the first entry of its set, the one encoded before it is kept in the second, and the one
-	// in the second is kept in the victims, in the place of the one evicted the earliest.
-	if evicted := set[len(set)-1]; evicted.codeSet != nil {
-		c.recentVictims[c.recentVictimNext%recentCodeSetVictims] = evicted
-		c.recentVictimNext++
-	}
-	set[1] = set[0]
-	set[0] = recentCodeSet{typeptr: key, codeSet: codeSet}
+	c.rememberCodeSet(key, codeSet)
 	if withContext {
 		return getFilteredCodeSetIfNeeded(c, codeSet)
 	}
